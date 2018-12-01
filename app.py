@@ -16,7 +16,7 @@ def create_dream():
 
 @app.route('/')
 def test():
-    return send_from_directory("test.zip")
+    return send_from_directory(".","test.zip")
 
 if __name__ == "__main__":
-    app.run()
+    app.run(host='0.0.0.0')
