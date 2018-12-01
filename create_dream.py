@@ -4,6 +4,7 @@ import os
 import random
 import subprocess
 import six
+import zipfile
 
 import cv2 as cv
 from google.cloud import language
@@ -11,7 +12,7 @@ from google.cloud.language import enums, types
 from PIL import Image  # Image from PIL
 
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/home/connor/youdreamof.json"
-
+MAX_ITERATIONS = 5
 
 def entities_text(text):
     """Detects entities in the text."""
@@ -69,7 +70,7 @@ def syntax_text(text):
                                token.text.content))
 
 def get_related_words(word):
-    subprocess.call(["node", "google_trends.js", word])
+    subprocess.call(["node", "../google_trends.js", word])
     with open("google_trends.json", "r") as f:
         data = json.load(f)
     data = data["default"]["rankedList"][1]["rankedKeyword"]
@@ -78,7 +79,7 @@ def get_related_words(word):
      word = d["topic"]["title"]
      words.append(word)
 
-    return words
+    return set(words)
 
 def get_images(word, folder):
     if not os.path.exists(folder):
@@ -120,22 +121,30 @@ def faceCrop(imagePattern, boxScale=1):
             continue
 
 def make_tileable(foreground, background):
-    background = Image.open(background)
+    background = Image.open(background).resize((512, 512))
     foreground = Image.open(foreground).resize((512, 512))
 
     background.paste(foreground, (0, 0), foreground)
-    background.save("combined.png")
+    name = background.split(".")[0]
+    background.save(name + "_combined.png")
 
 def make_text(speaker, start, amount, file):
     subprocess.call(["python3", "tensorflow-char-rnn/sample.py", "--init_dir=" + os.path.join("tensorflow-char-rnn", speaker), "--start_text=" + start, "--length="+str(amount), ">", file])
 
+def zipdir(path, ziph):
+    # ziph is zipfile handle
+    for root, dirs, files in os.walk(path):
+        for file in files:
+            ziph.write(os.path.join(root, file))
 
 def create_dream(data):
     # Takes in the dict from Unity, finishes by creatig a 'dream'.zip
     dream = data["dreamKeyword"]
     if not os.path.exists(dream):
         os.mkdir(dream)
+    os.chdir(dream)
     words = get_related_words(data["dreamKeyword"])
+    words.add(dream)
 
     # Understand our words with google
     words_s = " ".join(words)
@@ -145,23 +154,91 @@ def create_dream(data):
 
     entities = {}
     for e_t in entity_type:
-        entities[e_t] = []
+        entities[e_t] = set()
 
     for entity in entities_extract:
         name = entity.name
-        t = entities[entity_type[entity.type]].append(name)
+        t = entities[entity_type[entity.type]].add(name)
 
     # See if we have enough entities/persons
     # If not enough, expand things further if necessary and keep going
+    num_people = len(entities["PERSON"])
+    num_iterations = 0
+    while num_people < data["numPeople"] and num_iterations < MAX_ITERATIONS:
+        word = random.sample(words, 1)[0]
+        for new_word in get_related_words(word):
+            words.add(new_word)
 
-    for word in words:
-        get_images(word, os.path.join(dream, word))
-        faceCrop(os.path.join(dream, word, "*"))
+        # Understand our words with google
+        words_s = " ".join(words)
+        entities_extract = entities_text(words_s)
+        entity_type = ('UNKNOWN', 'PERSON', 'LOCATION', 'ORGANIZATION',
+                    'EVENT', 'WORK_OF_ART', 'CONSUMER_GOOD', 'OTHER')
 
-    # See how many faces and objects we've got
-    # If not enough, expand things further if necessary and keep going
+        for entity in entities_extract:
+            name = entity.name
+            t = entities[entity_type[entity.type]].add(name)
 
-    # Style, modify and moveimages
+        num_people = len(entities["PERSON"])
+        num_iterations += 1
+
+    print(entities)
+    print("Num people: " + str(len(entities["PERSON"])))
+
+    # Select number of people, items, etc
+    people = random.sample(list(entities["PERSON"]), data["numPeople"])
+    if dream in list(entities["PERSON"]) and not dream in people:
+        people[:-1].append(dream)
+
+    items = random.sample(list(entities["WORK_OF_ART"]+entities["CONSUMER_GOOD"]+entities["OTHER"]), data["numObjects"])
+
+    for word in people:
+        get_images(word, word)
+        faceCrop(os.path.join(word, "*"))
+
+    for word in items:
+        get_images(word, word)
+        get_images(word, word)
+
+
+    # Style, modify and move images
+
+    # Create image json
+    out_data = {"data": []}
+    for person in people:
+        record = {"keyword": person, "type":1}
+        if person == dream:
+            record["dreamTarget"] = True
+        else:
+            record["dreamTarget"] = False
+
+        files = [ f for f in os.listdir(os.path.join(person, "finished") ) if os.path.isfile(f) and not "crop" in f]
+        files = random.sample(files, 5)
+
+        faces = [ f for f in os.listdir(os.path.join(person, "finished") ) if os.path.isfile(f) and "crop" in f]
+        faces = random.sample(faces, 5)
+
+        record["generalImages"] = files
+        record["faceImages"] = faces
+
+        out_data["data"].append(record)
+
+    for item in items:
+        record = {"keyword": item, "type":0}
+        if item == dream:
+            record["dreamTarget"] = True
+        else:
+            record["dreamTarget"] = False
+
+        files = [ f for f in os.listdir(os.path.join(person, "finished") ) if os.path.isfile(f)]
+        files = random.sample(files, 5)
+
+        record["generalImages"] = files
+
+        out_data["data"].append(record)
+
+    
+    
 
     # Generate the texts needed
     # Call RNN
@@ -169,12 +246,17 @@ def create_dream(data):
     # Postprocess
 
     # Write jsons
-    # zip
 
 
 
-data = json.load("sample.json")
-create_dream(data)
+    #zipf = zipfile.ZipFile(os.path.join("..", dream + ".zip"), 'w', zipfile.ZIP_DEFLATED)
+    #zipdir(".", zipf)
+    #zipf.close()
+
+
+#make_tileable("organic_border.png", "out5.png")
+#data = json.load(open("sample.json", "r"))
+#create_dream(data)
 #print(get_related_words("Nicholas Cage"))
 
 #get_images("Nicolas Cage", "cage")
