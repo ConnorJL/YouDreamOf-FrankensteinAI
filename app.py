@@ -12,11 +12,11 @@ def create_dream():
     numPeople = request.args.get("numPeople")
     data = {"dreamKeyword":dream, "numNPCTexts": numNPCTexts, "numObjects": numObjects, "numPeople" : numPeople}
     create_dream(data)
-    return send_from_directory(dream + ".zip")
+    return send_from_directory(".", dream + ".zip")
 
 @app.route('/')
 def test():
-    return send_from_directory("test.zip")
+    return send_from_directory(".", "test.zip")
 
 if __name__ == "__main__":
     app.run()
