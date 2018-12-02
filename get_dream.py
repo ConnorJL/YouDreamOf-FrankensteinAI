@@ -3,11 +3,13 @@ import json
 import requests
 import shutil
 import subprocess
+import sys
 import zipfile
 
-MAGIC_URL = "http://10.148.132.40:8888/create"
+MAGIC_URL = "http://10.148.132.40:5000/"
 UNITY_DIRECTORY = "assets"
-with open("dream.json") as f:
+fi = sys.argv[1]
+with open(fi) as f:
     data = json.load(f)
 
 dream = data["dreamKeyword"]
