@@ -2,6 +2,7 @@ import glob
 import json
 import os
 import random
+import shutil
 import subprocess
 import six
 import zipfile
@@ -11,8 +12,20 @@ from google.cloud import language
 from google.cloud.language import enums, types
 from PIL import Image  # Image from PIL
 
+
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/home/connor/youdreamof.json"
 MAX_ITERATIONS = 5
+NUM_VOICES = 3
+VOICE_SPLIT_LINE = "Sampled text is:"
+AVG_LINE_LENGTH = 100
+
+def id_to_speaker(id):
+    if id == 1:
+        return "shakespeare"
+    if id == 2:
+        return "skyrim"
+    if id == 3:
+        return "southpark"
 
 def entities_text(text):
     """Detects entities in the text."""
@@ -34,14 +47,14 @@ def entities_text(text):
     entity_type = ('UNKNOWN', 'PERSON', 'LOCATION', 'ORGANIZATION',
                    'EVENT', 'WORK_OF_ART', 'CONSUMER_GOOD', 'OTHER')
 
-    for entity in entities:
-        print('=' * 20)
-        print(u'{:<16}: {}'.format('name', entity.name))
-        print(u'{:<16}: {}'.format('type', entity_type[entity.type]))
-        print(u'{:<16}: {}'.format('metadata', entity.metadata))
-        print(u'{:<16}: {}'.format('salience', entity.salience))
-        print(u'{:<16}: {}'.format('wikipedia_url',
-              entity.metadata.get('wikipedia_url', '-')))
+    #for entity in entities:
+    #    print('=' * 20)
+    #    print(u'{:<16}: {}'.format('name', entity.name))
+    #    print(u'{:<16}: {}'.format('type', entity_type[entity.type]))
+    #    print(u'{:<16}: {}'.format('metadata', entity.metadata))
+    #    print(u'{:<16}: {}'.format('salience', entity.salience))
+    #    print(u'{:<16}: {}'.format('wikipedia_url',
+    #          entity.metadata.get('wikipedia_url', '-')))
 
     return entities
 
@@ -85,7 +98,7 @@ def get_images(word, folder):
     if not os.path.exists(folder):
         os.mkdir(folder)
 
-    subprocess.call(["python3", "download.py", "-s", word, "-d", folder, "-n", "10"])
+    subprocess.call(["python3", "../download.py", "-s", word, "-d", folder, "-n", "10"])
 
 def imgCrop(image, cropBox, boxScale=1):
     # Crop a PIL image with the provided box [x(left), y(upper), w(width), h(height)]
@@ -100,7 +113,7 @@ def imgCrop(image, cropBox, boxScale=1):
     return image.crop(PIL_box)
 
 def faceCrop(imagePattern, boxScale=1):
-    face_cascade = cv.CascadeClassifier('haarcascade_frontalface_alt.xml')
+    face_cascade = cv.CascadeClassifier('../haarcascade_frontalface_alt.xml')
 
     imgList=glob.glob(imagePattern)
     if len(imgList)<=0:
@@ -128,8 +141,41 @@ def make_tileable(foreground, background):
     name = background.split(".")[0]
     background.save(name + "_combined.png")
 
-def make_text(speaker, start, amount, file):
-    subprocess.call(["python3", "tensorflow-char-rnn/sample.py", "--init_dir=" + os.path.join("tensorflow-char-rnn", speaker), "--start_text=" + start, "--length="+str(amount), ">", file])
+def make_text(speaker, start, amount):
+    speaker = id_to_speaker(speaker)
+    subprocess.call(["python3", "tensorflow-char-rnn/sample.py", "--init_dir=" + os.path.join("tensorflow-char-rnn", speaker), "--start_text=" + start, "--length="+str(amount), ">", speaker+".tmp"])
+    with open(speaker+".tmp", "r") as f:
+        lines = f.read().split(VOICE_SPLIT_LINE[-1])
+    return lines
+
+def process_text(lines, our_entities):
+    # Replace names with ours
+    entities_extract = entities_text(lines)
+    entity_type = ('UNKNOWN', 'PERSON', 'LOCATION', 'ORGANIZATION',
+                   'EVENT', 'WORK_OF_ART', 'CONSUMER_GOOD', 'OTHER')
+
+    entities = {}
+    for e_t in entity_type:
+        entities[e_t] = set()
+
+    for entity in entities_extract:
+        name = entity.name
+        t = entities[entity_type[entity.type]].add(name)
+
+    for t in entity_type:
+        if len(our_entities[t]) == 0:
+            continue
+        for thing in entities[t]:
+            if(len(our_entities[t]) == 0):
+                lines.replace(entity, "")
+            else:
+                try:
+                    lines.replace(entity, random.sample(list(our_entities[t]), 1))
+                except:
+                    pass
+
+    return lines
+
 
 def zipdir(path, ziph):
     # ziph is zipfile handle
@@ -139,12 +185,20 @@ def zipdir(path, ziph):
 
 def create_dream(data):
     # Takes in the dict from Unity, finishes by creatig a 'dream'.zip
-    dream = data["dreamKeyword"]
+    dream = data["dreamKeyword"].replace("/", "")
     if not os.path.exists(dream):
         os.mkdir(dream)
     os.chdir(dream)
-    words = get_related_words(data["dreamKeyword"])
+    words_dirty = get_related_words(data["dreamKeyword"])
+    words = set()
+    for word in words_dirty:
+        word = word.replace("/", "")
+        if len(word) > 40:
+            word = word[:40]
+        words.add(word)
+    
     words.add(dream)
+    print("Got first words: " + str(words) +"\n")
 
     # Understand our words with google
     words_s = " ".join(words)
@@ -164,9 +218,12 @@ def create_dream(data):
     # If not enough, expand things further if necessary and keep going
     num_people = len(entities["PERSON"])
     num_iterations = 0
-    while num_people < data["numPeople"] and num_iterations < MAX_ITERATIONS:
+    while num_people < data["numPeople"]:
         word = random.sample(words, 1)[0]
         for new_word in get_related_words(word):
+            new_word = new_word.replace("/", "")
+            if len(new_word) > 40:
+                new_word = new_word[:40]
             words.add(new_word)
 
         # Understand our words with google
@@ -180,6 +237,27 @@ def create_dream(data):
             t = entities[entity_type[entity.type]].add(name)
 
         num_people = len(entities["PERSON"])
+
+    num_iterations = 0
+    num_objects = len(entities["WORK_OF_ART"].union(entities["CONSUMER_GOOD"].union(entities["OTHER"])))
+
+    while num_objects < data["numObjects"]:
+        word = random.sample(words, 1)[0]
+        for new_word in get_related_words(word):
+            new_word = new_word.replace("/", "")
+            words.add(new_word)
+
+        # Understand our words with google
+        words_s = " ".join(words)
+        entities_extract = entities_text(words_s)
+        entity_type = ('UNKNOWN', 'PERSON', 'LOCATION', 'ORGANIZATION',
+                    'EVENT', 'WORK_OF_ART', 'CONSUMER_GOOD', 'OTHER')
+
+        for entity in entities_extract:
+            name = entity.name
+            t = entities[entity_type[entity.type]].add(name)
+
+        num_objects = len(entities["WORK_OF_ART"].union(entities["CONSUMER_GOOD"].union(entities["OTHER"])))
         num_iterations += 1
 
     print(entities)
@@ -190,20 +268,22 @@ def create_dream(data):
     if dream in list(entities["PERSON"]) and not dream in people:
         people[:-1].append(dream)
 
-    items = random.sample(list(entities["WORK_OF_ART"]+entities["CONSUMER_GOOD"]+entities["OTHER"]), data["numObjects"])
+    items = random.sample(list(entities["WORK_OF_ART"].union(entities["CONSUMER_GOOD"].union(entities["OTHER"]))), data["numObjects"])
 
     for word in people:
         get_images(word, word)
-        faceCrop(os.path.join(word, "*"))
+        faceCrop(os.path.join(word+"/*"))
 
     for word in items:
-        get_images(word, word)
         get_images(word, word)
 
 
     # Style, modify and move images
 
     # Create image json
+    if not os.path.exists("out"):
+        os.mkdir("out")
+
     out_data = {"data": []}
     for person in people:
         record = {"keyword": person, "type":1}
@@ -212,14 +292,39 @@ def create_dream(data):
         else:
             record["dreamTarget"] = False
 
-        files = [ f for f in os.listdir(os.path.join(person, "finished") ) if os.path.isfile(f) and not "crop" in f]
-        files = random.sample(files, 5)
+        files = [ f for f in os.listdir(person ) if os.path.isfile(os.path.join(person, f)) and not "crop" in f]
+        try:
+            files = random.sample(files, 5)
+        except:
+            files = [ f for f in os.listdir(person ) if os.path.isfile(os.path.join(person, f)) and not "crop" in f]
 
-        faces = [ f for f in os.listdir(os.path.join(person, "finished") ) if os.path.isfile(f) and "crop" in f]
-        faces = random.sample(faces, 5)
+        true_files = []
+        for f in files:
+            try:
+                shutil.move(os.path.join(person, f), os.path.join("out", f))
+                true_files.append(f)
+            except:
+                continue
+            
 
-        record["generalImages"] = files
-        record["faceImages"] = faces
+
+        faces = [ f for f in os.listdir(person) if os.path.isfile(os.path.join(person, f)) and "crop" in f]
+        try:
+            faces = random.sample(faces, 5)
+        except:
+            faces = [ f for f in os.listdir(person) if os.path.isfile(os.path.join(person, f)) and "crop" in f]
+
+        true_faces = []
+        for f in faces:
+            try:
+                shutil.move(os.path.join(person, f), os.path.join("out", f))
+                true_faces.append(f)
+            except:
+                continue
+
+
+        record["generalImages"] = true_files
+        record["faceImages"] = true_faces
 
         out_data["data"].append(record)
 
@@ -230,33 +335,52 @@ def create_dream(data):
         else:
             record["dreamTarget"] = False
 
-        files = [ f for f in os.listdir(os.path.join(person, "finished") ) if os.path.isfile(f)]
-        files = random.sample(files, 5)
+        files = [ f for f in os.listdir(item ) if os.path.isfile(os.path.join(item, f))]
+        try:
+            files = random.sample(files, 5)
+        except:
+            files = [ f for f in os.listdir(item ) if os.path.isfile(os.path.join(item, f))]
 
-        record["generalImages"] = files
+        true_files = []
+        for f in files:
+            try:
+                shutil.move(os.path.join(item, f), os.path.join("out", f))
+                true_files.append(f)
+            except:
+                continue
+            
+
+        record["generalImages"] = true_files
 
         out_data["data"].append(record)
 
-    
-    
-
+    print("Generating text")
     # Generate the texts needed
     # Call RNN
-    # Analyze with Google
-    # Postprocess
+    for i in range(data["numNPCTexts"]):
+        voice = random.randint(1, NUM_VOICES)
+        #lines = make_text(voice, "Hello ", random.randint(int(0.75*AVG_LINE_LENGTH), int(1.5*AVG_LINE_LENGTH)))
+        lines = "Test"
+        lines = process_text(lines, entities)
+        print("Processed: " + lines)
+        record = {"keyword": lines, "type": 3, "dreamTarget": False, "generalImages": [], "faceImages": [], "speechStyle": voice}
 
-    # Write jsons
+        out_data["data"].append(record)
 
 
+    with open("out/data.json", "w") as f:
+        json.dump(out_data, f)
 
-    #zipf = zipfile.ZipFile(os.path.join("..", dream + ".zip"), 'w', zipfile.ZIP_DEFLATED)
-    #zipdir(".", zipf)
-    #zipf.close()
+    zipf = zipfile.ZipFile(os.path.join("..", dream + ".zip"), 'w', zipfile.ZIP_DEFLATED)
+    os.chdir("out")
+    zipdir(".", zipf)
+    zipf.close()
+    os.chdir("../..")
 
 
 #make_tileable("organic_border.png", "out5.png")
-#data = json.load(open("sample.json", "r"))
-#create_dream(data)
+data = json.load(open("sample.json", "r"))
+create_dream(data)
 #print(get_related_words("Nicholas Cage"))
 
 #get_images("Nicolas Cage", "cage")
