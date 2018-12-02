@@ -15,17 +15,17 @@ from PIL import Image  # Image from PIL
 
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/home/connor/youdreamof.json"
 MAX_ITERATIONS = 5
-NUM_VOICES = 3
+NUM_VOICES = 2
 VOICE_SPLIT_LINE = "Sampled text is:"
-AVG_LINE_LENGTH = 100
+AVG_LINE_LENGTH = 200
 
 def id_to_speaker(id):
-    if id == 1:
+    if id == 0:
         return "shakespeare"
-    if id == 2:
+    if id == 1:
         return "skyrim"
-    if id == 3:
-        return "southpark"
+    #if id == 3:
+    #    return "southpark"
 
 def entities_text(text):
     """Detects entities in the text."""
@@ -133,19 +133,21 @@ def faceCrop(imagePattern, boxScale=1):
         except:
             continue
 
-def make_tileable(foreground, background):
+def make_tileable(foreground, background, path):
     background = Image.open(background).resize((512, 512))
     foreground = Image.open(foreground).resize((512, 512))
 
     background.paste(foreground, (0, 0), foreground)
     name = background.split(".")[0]
-    background.save(name + "_combined.png")
+    new_name = name + "_combined." + background.split(".")[-1]
+    background.save(os.path.join(path, new_name))
+
+    return new_name
 
 def make_text(speaker, start, amount):
     speaker = id_to_speaker(speaker)
-    subprocess.call(["python3", "tensorflow-char-rnn/sample.py", "--init_dir=" + os.path.join("tensorflow-char-rnn", speaker), "--start_text=" + start, "--length="+str(amount), ">", speaker+".tmp"])
-    with open(speaker+".tmp", "r") as f:
-        lines = f.read().split(VOICE_SPLIT_LINE[-1])
+    out = subprocess.check_output(["python3", "sample.py", "--init_dir=" + speaker, "--start_text=" + start, "--length="+str(amount)])
+    lines = out.split(VOICE_SPLIT_LINE)[-1]
     return lines
 
 def process_text(lines, our_entities):
@@ -183,6 +185,34 @@ def zipdir(path, ziph):
         for file in files:
             ziph.write(os.path.join(root, file))
 
+def mutate(f, path, mutation):
+    if mutation == 0:
+        mutation = "grass"
+    elif mutation == 1:
+        mutation = "brick"
+    elif mutation == 2:
+        return
+        mutation = "bark"
+    else:
+        mutation = "meat"
+
+        
+    model = mutation + ".model"
+
+    name = f.split(".")[0]
+    end = f.split(".")[-1]
+    new_name = name + "_" + mutation + "." + end
+
+
+
+    path_to_output = os.path.join(path, new_name)
+
+    print("f: " + f + " " + new_name + " path: " + path_to_output)
+    subprocess.call(["python3", "neural_style.py", "eval", "--content-image", os.path.join(path, f),  "--model", "logs/" + model, "--output-image", path_to_output, "--cuda", "1"])
+
+    # new_name = make_tileable(mutation+"_border.png", path_to_output, path)
+    return new_name
+
 def create_dream(data):
     # Takes in the dict from Unity, finishes by creatig a 'dream'.zip
     dream = data["dreamKeyword"].replace("/", "")
@@ -218,7 +248,7 @@ def create_dream(data):
     # If not enough, expand things further if necessary and keep going
     num_people = len(entities["PERSON"])
     num_iterations = 0
-    while num_people < data["numPeople"]:
+    while num_people < data["numPeople"] or num_iterations > MAX_ITERATIONS:
         word = random.sample(words, 1)[0]
         for new_word in get_related_words(word):
             new_word = new_word.replace("/", "")
@@ -241,7 +271,7 @@ def create_dream(data):
     num_iterations = 0
     num_objects = len(entities["WORK_OF_ART"].union(entities["CONSUMER_GOOD"].union(entities["OTHER"])))
 
-    while num_objects < data["numObjects"]:
+    while num_objects < data["numObjects"] or num_iterations > MAX_ITERATIONS:
         word = random.sample(words, 1)[0]
         for new_word in get_related_words(word):
             new_word = new_word.replace("/", "")
@@ -315,16 +345,45 @@ def create_dream(data):
             faces = [ f for f in os.listdir(person) if os.path.isfile(os.path.join(person, f)) and "crop" in f]
 
         true_faces = []
+        grass_faces = []
+        brick_faces = []
+        bark_faces = []
+        meat_faces = []
         for f in faces:
             try:
                 shutil.move(os.path.join(person, f), os.path.join("out", f))
                 true_faces.append(f)
+                
+                mutation = random.randint(0, 3)
+                os.chdir("../torch-fast")
+                try:
+                    mut_f = mutate(f, os.path.join("..", dream, "out"), mutation)
+                except:
+                    os.chdir("../" + dream)
+                    continue
+                mut_f = f
+                if mutation == 0:
+                    grass_faces.append(mut_f)
+                elif mutation == 1:
+                    brick_faces.append(mut_f)
+                elif mutation == 2:
+                    # bark_faces.append(mut_f)
+                    pass
+                else:
+                    meat_faces.append(mut_f)
+
+                os.chdir("../" + dream)
+                
             except:
                 continue
 
 
         record["generalImages"] = true_files
         record["faceImages"] = true_faces
+        record["grassFaces"] = grass_faces
+        record["brickFaces"] = brick_faces
+        record["barkFaces"] = bark_faces
+        record["meatFaces"] = meat_faces
 
         out_data["data"].append(record)
 
@@ -357,30 +416,37 @@ def create_dream(data):
     print("Generating text")
     # Generate the texts needed
     # Call RNN
+    os.chdir("../tensorflow-char-rnn")
     for i in range(data["numNPCTexts"]):
-        voice = random.randint(1, NUM_VOICES)
-        #lines = make_text(voice, "Hello ", random.randint(int(0.75*AVG_LINE_LENGTH), int(1.5*AVG_LINE_LENGTH)))
-        lines = "Test"
+        voice = random.randint(0, NUM_VOICES-1)
+        lines = make_text(voice, "Hello ", random.randint(int(0.75*AVG_LINE_LENGTH), int(1.5*AVG_LINE_LENGTH)))
         lines = process_text(lines, entities)
         print("Processed: " + lines)
         record = {"keyword": lines, "type": 3, "dreamTarget": False, "generalImages": [], "faceImages": [], "speechStyle": voice}
 
         out_data["data"].append(record)
 
+    os.chdir("..")
+    os.chdir(dream)
+
 
     with open("out/data.json", "w") as f:
         json.dump(out_data, f)
 
+    print("Zipping")
     zipf = zipfile.ZipFile(os.path.join("..", dream + ".zip"), 'w', zipfile.ZIP_DEFLATED)
     os.chdir("out")
     zipdir(".", zipf)
     zipf.close()
     os.chdir("../..")
+    print("Cleaning up")
+    #subprocess.call(["rm", "-r", dream])
 
+if __name__ == "__main__":
 
 #make_tileable("organic_border.png", "out5.png")
-data = json.load(open("sample.json", "r"))
-create_dream(data)
+    data = json.load(open("sample.json", "r"))
+    create_dream(data)
 #print(get_related_words("Nicholas Cage"))
 
 #get_images("Nicolas Cage", "cage")
